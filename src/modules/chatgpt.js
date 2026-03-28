@@ -151,10 +151,37 @@ class ChatGPTModule {
     async generateImage(imagePrompt, outputPath) {
         let page;
         const fs = require('fs');
+        let capturedImageBuffer = null;
+
         try {
             page = await browserManager.getPage();
-            console.log('Navigating to ChatGPT for DALLE-3 fallback image generation...');
-            
+            console.log('Navigating to ChatGPT for DALLE-3 image generation...');
+
+            // ✅ FIX: Intercept the DALL-E image at the NETWORK level before CORS policies apply.
+            // This avoids the canvas "tainted" bug that caused washed-out/white saved images.
+            await page.setRequestInterception(true);
+            page.on('request', (req) => req.continue());
+            page.on('response', async (response) => {
+                try {
+                    const url = response.url();
+                    const contentType = response.headers()['content-type'] || '';
+                    // Capture DALL-E image CDN responses (estuary/content or oaidalleapiprodscus)
+                    const isDalleImage = (
+                        url.includes('estuary/content') ||
+                        url.includes('oaidalleapiprodscus') ||
+                        url.includes('openai.com/files')
+                    ) && contentType.startsWith('image/');
+
+                    if (isDalleImage && !capturedImageBuffer) {
+                        console.log(`📸 Intercepted DALL-E image from network: ${url.substring(0, 80)}...`);
+                        capturedImageBuffer = await response.buffer();
+                        console.log(`✅ Image buffer captured (${(capturedImageBuffer.length / 1024).toFixed(1)} KB)`);
+                    }
+                } catch (e) {
+                    // Some responses may fail to read buffer (e.g. redirects), ignore those
+                }
+            });
+
             await page.goto('https://chatgpt.com/', { waitUntil: 'networkidle2' });
             await this.handleVerification(page);
 
@@ -162,8 +189,13 @@ class ChatGPTModule {
             if (isLoggedOut) throw new Error('ChatGPT session expired. Please run manual login.');
 
             console.log('Entering image prompt into ChatGPT...');
-            const textareaSelectors = ['div#prompt-textarea', 'textarea#prompt-textarea', 'textarea[placeholder*="ChatGPT"]', '[contenteditable="true"]'];
-            
+            const textareaSelectors = [
+                'div#prompt-textarea',
+                'textarea#prompt-textarea',
+                'textarea[placeholder*="ChatGPT"]',
+                '[contenteditable="true"]'
+            ];
+
             let foundSelector = null;
             for (const selector of textareaSelectors) {
                 try {
@@ -178,20 +210,20 @@ class ChatGPTModule {
             }
 
             const finalPrompt = `Generate exactly 1 high quality image for this prompt. DO NOT write any text, strictly provide the image. Prompt: ${imagePrompt}`;
-            
+
             await page.click(foundSelector);
             await page.type(foundSelector, finalPrompt, { delay: 50 });
             await page.keyboard.press('Enter');
 
             console.log('Waiting for DALLE-3 generation to begin...');
             await new Promise(r => setTimeout(r, 2000));
-            
-            console.log('Waiting for generation to complete (this may take up to 20 seconds)...');
+
+            console.log('Waiting for generation to complete (up to 120 seconds)...');
             await page.waitForFunction(
                 () => {
                     const stopBtns = document.querySelector('button[aria-label*="Stop"], button[data-testid*="stop"]');
                     if (stopBtns) return false;
-                    
+
                     const labels = Array.from(document.querySelectorAll('span'));
                     const isCreating = labels.some(l => l.innerText && l.innerText.toLowerCase().includes('creating image'));
                     if (isCreating) return false;
@@ -200,57 +232,66 @@ class ChatGPTModule {
                     if (images.length > 0) return true;
 
                     const messages = document.querySelectorAll('div[data-message-author-role="assistant"], section[data-turn="assistant"]');
-                    if (messages.length === 0) return false; 
+                    if (messages.length === 0) return false;
                     const lastMessage = messages[messages.length - 1];
-                    if (lastMessage.querySelector('.result-streaming')) return false; 
+                    if (lastMessage.querySelector('.result-streaming')) return false;
 
                     return true;
                 },
                 { timeout: 120000, polling: 3000 }
             );
 
-            console.log('Extracting generated image from chat DOM...');
-            const imageUrl = await page.evaluate(async () => {
-                // Identify DALL-E images globally since we are just looking for the newest one
+            // Give a short buffer for the response event to fire after DOM updates
+            await new Promise(r => setTimeout(r, 1500));
+
+            // --- Strategy 1: Use network-intercepted buffer (best quality, no CORS issues) ---
+            if (capturedImageBuffer && capturedImageBuffer.length > 10000) {
+                console.log('Saving intercepted DALL-E image buffer to disk...');
+                fs.writeFileSync(outputPath, capturedImageBuffer);
+                console.log(`✅ Image saved (network intercept) to ${outputPath}`);
+                return outputPath;
+            }
+
+            // --- Strategy 2: Fallback — download via Node.js (not browser fetch) using the src URL ---
+            console.warn('Network intercept missed image, falling back to Node.js download...');
+            const imageUrl = await page.evaluate(() => {
                 const imgs = Array.from(document.querySelectorAll('img[alt^="Generated image"], img[src*="estuary/content"]'));
-                
-                if (imgs.length > 0) {
-                    const img = imgs[imgs.length - 1]; // Pick the latest generated image
-                    try {
-                        const response = await fetch(img.src);
-                        const blob = await response.blob();
-                        return new Promise((resolve) => {
-                            const reader = new FileReader();
-                            reader.onloadend = () => resolve(reader.result);
-                            reader.readAsDataURL(blob);
-                        });
-                    } catch (e) {
-                         // DOM Canvas bridging fallback
-                        const canvas = document.createElement('canvas');
-                        canvas.width = img.naturalWidth || 1024;
-                        canvas.height = img.naturalHeight || 1024;
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0);
-                        return canvas.toDataURL('image/png');
-                    }
-                }
-                return null;
+                return imgs.length > 0 ? imgs[imgs.length - 1].src : null;
             });
 
             if (!imageUrl) {
                 await page.screenshot({ path: 'chatgpt_image_not_found.png' });
-                throw new Error('DALLE-3 image not found in the chat output.');
+                throw new Error('DALL-E image not found in the chat output.');
             }
 
-            console.log('Saving DALLE-3 image to disk...');
-            const base64Data = imageUrl.split(',')[1];
-            fs.writeFileSync(outputPath, base64Data, 'base64');
-            console.log(`✅ Image saved safely to ${outputPath}`);
+            // Use Node.js https/http to download (no CORS restrictions on the Node side)
+            const imageBuffer = await new Promise((resolve, reject) => {
+                const urlModule = imageUrl.startsWith('https') ? require('https') : require('http');
+                const chunks = [];
+                urlModule.get(imageUrl, (res) => {
+                    res.on('data', chunk => chunks.push(chunk));
+                    res.on('end', () => resolve(Buffer.concat(chunks)));
+                    res.on('error', reject);
+                }).on('error', reject);
+            });
+
+            if (!imageBuffer || imageBuffer.length < 10000) {
+                throw new Error(`Downloaded image is suspiciously small (${imageBuffer?.length} bytes). Generation may have failed.`);
+            }
+
+            console.log('Saving DALL-E image to disk (Node.js download)...');
+            fs.writeFileSync(outputPath, imageBuffer);
+            console.log(`✅ Image saved (Node.js fallback) to ${outputPath}`);
             return outputPath;
 
         } catch (error) {
-            console.error('ChatGPT Image Fallback Error:', error);
+            console.error('ChatGPT Image Generation Error:', error);
             throw error;
+        } finally {
+            // Always clean up request interception to avoid blocking future page use
+            try {
+                if (page) await page.setRequestInterception(false);
+            } catch (_) {}
         }
     }
 
