@@ -1,0 +1,62 @@
+# =============================
+# 🔐 Security / Credentials
+# =============================
+.env
+.env.*
+credentials.json
+token.json
+*.pem
+*.key
+*.cert
+
+# =============================
+# 📦 Node.js
+# =============================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# =============================
+# 🎬 Generated Media Assets
+# =============================
+public/audio/
+public/images/
+public/final_reel.mp4
+public/caption.txt
+public/final_script.json
+public/generated_repos.json
+
+# =============================
+# 🌐 Browser Session Data
+# =============================
+.browser-data/
+.user_data*/
+user_data/
+*.crx
+*.zip
+
+# =============================
+# 🛠️ Remotion / Build Output
+# =============================
+.remotion/
+out/
+dist/
+
+# =============================
+# 🖥️ OS / IDE Files
+# =============================
+.DS_Store
+Thumbs.db
+*.code-workspace
+.vscode/
+.idea/
+
+# =============================
+# 🐛 Debug Screenshots
+# =============================
+*.png
+chatgpt_failure.png
+chatgpt_dalle_failure.png
+chatgpt_image_not_found.png
