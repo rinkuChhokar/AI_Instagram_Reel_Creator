@@ -23,7 +23,7 @@ class BrowserManager {
         this.userDataDir = path.join(__dirname, '../../.browser-data');
     }
 
-    async init(headless = false, vanilla = false) {
+    async init(headless = true, vanilla = false) {
         await fs.ensureDir(this.userDataDir);
         
         const launchOptions = {
@@ -60,7 +60,7 @@ class BrowserManager {
             await this.close();
             await new Promise(r => setTimeout(r, 2000)); // wait to ensure profile unlocks
         }
-        await this.init(false, true);
+        await this.init(true, true);
     }
 
     async getPage() {
