@@ -40,7 +40,49 @@ async function main() {
     const isLogin = args.some(arg => arg === '--login');
     const useElevenLabs = args.some(arg => arg === '--use-elevenlab');
     const isTrending = args.some(arg => arg === '--trending');
+    const shouldUpload = args.some(arg => arg === '--upload');
     
+    // Upload-only mode: --upload passed with no generation triggers
+    const hasCustomPrompt = args.some(arg => !arg.startsWith('--'));
+    const isUploadOnly = shouldUpload && !isTrending && !isReuse && !hasCustomPrompt;
+
+    if (isUploadOnly) {
+      console.log('☁️  Upload-Only Mode: Skipping generation, uploading existing files to Google Drive...');
+      const publicDir = path.join(__dirname, 'public');
+      const outputLocation = path.join(publicDir, 'final_reel.mp4');
+      const captionPath = path.join(publicDir, 'caption.txt');
+      const scriptPath = path.join(publicDir, 'final_script.json');
+
+      if (!await fs.pathExists(outputLocation)) {
+        console.error('❌ No final_reel.mp4 found in /public. Generate a video first.');
+        process.exit(1);
+      }
+
+      // Read title from saved script for folder naming
+      let videoTitle = 'Untitled_Reel';
+      if (await fs.pathExists(scriptPath)) {
+        const savedScript = await fs.readJson(scriptPath);
+        videoTitle = savedScript.video_title || videoTitle;
+      }
+
+      const drive = new GoogleDriveModule();
+      await drive.init();
+
+      const rootFolderId = await drive.getOrCreateFolder('INSTAGRAM_REELS');
+      const dateStr = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+      const safeTitle = videoTitle.replace(/[^a-zA-Z0-9 -]/g, '');
+      const folderName = `${dateStr} - ${safeTitle}`;
+      const subFolderId = await drive.getOrCreateFolder(folderName, rootFolderId);
+
+      await drive.uploadFile(outputLocation, 'final_reel.mp4', subFolderId, 'video/mp4');
+      if (await fs.pathExists(captionPath)) {
+        await drive.uploadFile(captionPath, 'caption.txt', subFolderId, 'text/plain');
+      }
+
+      console.log('✅ Upload complete! Files pushed to Google Drive.');
+      process.exit(0);
+    }
+
     // Parse desired rendering resolution (e.g. --res 720p)
     const resIndex = args.indexOf('--res');
     const targetRes = resIndex !== -1 && resIndex + 1 < args.length ? args[resIndex + 1].toLowerCase() : '1080p';
@@ -223,24 +265,30 @@ async function main() {
     await fs.writeFile(captionPath, captionContent);
     console.log('📝 Saved Instagram caption.txt');
 
-    // Google Drive Upload Flow
-    console.log('☁️ Initiating Google Drive Upload...');
-    const drive = new GoogleDriveModule();
-    await drive.init();
-    
-    // Find or create the root "INSTAGRAM_REELS" folder
-    const rootFolderId = await drive.getOrCreateFolder('INSTAGRAM_REELS');
-    
-    // Create the timestamped specific subfolder
-    const dateStr = new Date().toISOString().replace(/:/g, '-').split('.')[0]; // e.g. "2026-03-24T12-30-00"
-    const safeTitle = (finalScript.video_title || 'Untitled_Reel').replace(/[^a-zA-Z0-9 -]/g, '');
-    const folderName = `${dateStr} - ${safeTitle}`;
-    
-    const subFolderId = await drive.getOrCreateFolder(folderName, rootFolderId);
-    
-    // Upload files
-    await drive.uploadFile(outputLocation, 'final_reel.mp4', subFolderId, 'video/mp4');
-    await drive.uploadFile(captionPath, 'caption.txt', subFolderId, 'text/plain');
+    // Google Drive Upload Flow (opt-in via --upload flag)
+    if (shouldUpload) {
+      console.log('☁️ Initiating Google Drive Upload...');
+      const drive = new GoogleDriveModule();
+      await drive.init();
+      
+      // Find or create the root "INSTAGRAM_REELS" folder
+      const rootFolderId = await drive.getOrCreateFolder('INSTAGRAM_REELS');
+      
+      // Create the timestamped specific subfolder
+      const dateStr = new Date().toISOString().replace(/:/g, '-').split('.')[0]; // e.g. "2026-03-24T12-30-00"
+      const safeTitle = (finalScript.video_title || 'Untitled_Reel').replace(/[^a-zA-Z0-9 -]/g, '');
+      const folderName = `${dateStr} - ${safeTitle}`;
+      
+      const subFolderId = await drive.getOrCreateFolder(folderName, rootFolderId);
+      
+      // Upload files
+      await drive.uploadFile(outputLocation, 'final_reel.mp4', subFolderId, 'video/mp4');
+      await drive.uploadFile(captionPath, 'caption.txt', subFolderId, 'text/plain');
+
+      console.log('☁️ Google Drive Upload Complete!');
+    } else {
+      console.log('⏭️ Skipping Google Drive upload. Use --upload flag to enable.');
+    }
 
     console.log('🎉 Production Pipeline Completely Finished!');
     await browserManager.close();

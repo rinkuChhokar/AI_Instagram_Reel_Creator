@@ -4,8 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "generate": "node index.js",
-    "dev": "remotion preview src/remotion/index.jsx"
+    "generate": "node index.js --trending --use-elevenlab --res 720p --upload",
+    "dev": "remotion preview src/remotion/index.jsx",
+    "upload": "node index.js --upload"
   },
   "keywords": [],
   "author": "",

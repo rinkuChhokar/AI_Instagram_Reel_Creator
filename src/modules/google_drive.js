@@ -6,7 +6,7 @@ const readline = require('readline');
 class GoogleDriveModule {
   async init(credentialsPath = 'credentials.json', tokenPath = 'token.json') {
     const resolvedPath = path.resolve(process.cwd(), credentialsPath);
-    const resolvedTokenPath = path.resolve(process.cwd(), tokenPath);
+    this.resolvedTokenPath = path.resolve(process.cwd(), tokenPath);
     
     if (!fs.existsSync(resolvedPath)) {
       throw new Error(`Google Drive Error: OAuth Credentials file not found at ${resolvedPath}.\nPlease download your OAuth 2.0 Client ID JSON from Google Cloud Console and save it as credentials.json!`);
@@ -25,21 +25,51 @@ class GoogleDriveModule {
     // Fallback to out-of-band if no valid redirects exist
     const redirectUri = (redirect_uris && redirect_uris.length > 0) ? redirect_uris[0] : 'urn:ietf:wg:oauth:2.0:oob';
     
-    const oAuth2Client = new google.auth.OAuth2(
+    this.oAuth2Client = new google.auth.OAuth2(
       client_id,
       client_secret,
       redirectUri
     );
 
-    // Check if we have previously stored a token.
-    if (fs.existsSync(resolvedTokenPath)) {
-      const token = fs.readFileSync(resolvedTokenPath, 'utf8');
-      oAuth2Client.setCredentials(JSON.parse(token));
+    // Load existing token or run interactive auth flow
+    if (fs.existsSync(this.resolvedTokenPath)) {
+      const token = JSON.parse(fs.readFileSync(this.resolvedTokenPath, 'utf8'));
+      this.oAuth2Client.setCredentials(token);
+
+      // Proactively check if token is expired or has no refresh_token
+      const isExpired = token.expiry_date && token.expiry_date < Date.now();
+      const hasRefresh = !!token.refresh_token;
+      if (isExpired && !hasRefresh) {
+        console.warn('[Drive] ⚠️  Token is expired and has no refresh_token. Re-authorizing...');
+        fs.unlinkSync(this.resolvedTokenPath);
+        await this.getAccessToken(this.oAuth2Client, this.resolvedTokenPath);
+      }
     } else {
-      await this.getAccessToken(oAuth2Client, resolvedTokenPath);
+      await this.getAccessToken(this.oAuth2Client, this.resolvedTokenPath);
     }
     
-    this.drive = google.drive({ version: 'v3', auth: oAuth2Client });
+    this.drive = google.drive({ version: 'v3', auth: this.oAuth2Client });
+  }
+
+  // Wraps a Drive API call — if invalid_grant fires, wipes token and re-auths automatically
+  async _withAuthRetry(fn) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isInvalidGrant = err?.response?.data?.error === 'invalid_grant' ||
+                             err?.message?.includes('invalid_grant');
+      if (isInvalidGrant) {
+        console.warn('\n[Drive] 🔑 Token expired/revoked (invalid_grant). Deleting stale token and re-authorizing...');
+        if (fs.existsSync(this.resolvedTokenPath)) {
+          fs.unlinkSync(this.resolvedTokenPath);
+        }
+        await this.getAccessToken(this.oAuth2Client, this.resolvedTokenPath);
+        this.drive = google.drive({ version: 'v3', auth: this.oAuth2Client });
+        // Retry once with the new token
+        return await fn();
+      }
+      throw err;
+    }
   }
 
   getAccessToken(oAuth2Client, tokenPath) {
@@ -82,61 +112,65 @@ class GoogleDriveModule {
   }
 
   async getOrCreateFolder(folderName, parentId = null) {
-    console.log(`[Drive] Scanning for folder: ${folderName}...`);
-    let query = `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-    
-    if (parentId) {
-      query += ` and '${parentId}' in parents`;
-    }
+    return this._withAuthRetry(async () => {
+      console.log(`[Drive] Scanning for folder: ${folderName}...`);
+      let query = `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+      
+      if (parentId) {
+        query += ` and '${parentId}' in parents`;
+      }
 
-    const res = await this.drive.files.list({
-      q: query,
-      fields: 'files(id, name)',
-      spaces: 'drive',
+      const res = await this.drive.files.list({
+        q: query,
+        fields: 'files(id, name)',
+        spaces: 'drive',
+      });
+      
+      if (res.data.files && res.data.files.length > 0) {
+        console.log(`[Drive] ✅ Found existing folder: ${folderName}`);
+        return res.data.files[0].id;
+      }
+      
+      console.log(`[Drive] 🔨 Creating new folder: ${folderName}...`);
+      const fileMetadata = {
+        name: folderName,
+        mimeType: 'application/vnd.google-apps.folder',
+      };
+      if (parentId) {
+        fileMetadata.parents = [parentId];
+      }
+      
+      const folder = await this.drive.files.create({
+        resource: fileMetadata,
+        fields: 'id',
+      });
+      
+      return folder.data.id;
     });
-    
-    if (res.data.files && res.data.files.length > 0) {
-      console.log(`[Drive] ✅ Found existing folder: ${folderName}`);
-      return res.data.files[0].id;
-    }
-    
-    console.log(`[Drive] 🔨 Creating new folder: ${folderName}...`);
-    const fileMetadata = {
-      name: folderName,
-      mimeType: 'application/vnd.google-apps.folder',
-    };
-    if (parentId) {
-      fileMetadata.parents = [parentId];
-    }
-    
-    const folder = await this.drive.files.create({
-      resource: fileMetadata,
-      fields: 'id',
-    });
-    
-    return folder.data.id;
   }
 
   async uploadFile(localFilePath, targetFileName, parentId, mimeType) {
-    console.log(`[Drive] ⬆️ Uploading ${targetFileName}...`);
-    const fileMetadata = {
-      name: targetFileName,
-      parents: [parentId]
-    };
-    
-    const media = {
-      mimeType: mimeType,
-      body: fs.createReadStream(localFilePath),
-    };
-    
-    const file = await this.drive.files.create({
-      resource: fileMetadata,
-      media: media,
-      fields: 'id',
+    return this._withAuthRetry(async () => {
+      console.log(`[Drive] ⬆️ Uploading ${targetFileName}...`);
+      const fileMetadata = {
+        name: targetFileName,
+        parents: [parentId]
+      };
+      
+      const media = {
+        mimeType: mimeType,
+        body: fs.createReadStream(localFilePath),
+      };
+      
+      const file = await this.drive.files.create({
+        resource: fileMetadata,
+        media: media,
+        fields: 'id',
+      });
+      
+      console.log(`[Drive] ☁️ Uploaded successfully!`);
+      return file.data.id;
     });
-    
-    console.log(`[Drive] ☁️ Uploaded successfully!`);
-    return file.data.id;
   }
 }
 
