@@ -24,6 +24,24 @@ export const Main = ({ scenes }) => {
           </Series.Sequence>
         ))}
       </Series>
+      <AbsoluteFill style={{
+        justifyContent: 'flex-end',
+        alignItems: 'center',
+        paddingBottom: '50px'
+      }}>
+        <div style={{
+          fontSize: '36px',
+          fontFamily: 'sans-serif',
+          color: 'rgba(255, 255, 255, 0.8)',
+          fontWeight: 'bold',
+          textShadow: '2px 2px 4px rgba(0,0,0,0.8)',
+          backgroundColor: 'rgba(0,0,0,0.4)',
+          padding: '10px 25px',
+          borderRadius: '15px'
+        }}>
+          RCBackendBite
+        </div>
+      </AbsoluteFill>
     </AbsoluteFill>
   );
 };
