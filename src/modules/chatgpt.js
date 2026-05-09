@@ -39,9 +39,29 @@ class ChatGPTModule {
                 throw new Error('Could not find visible ChatGPT prompt textarea. See chatgpt_failure.png');
             }
 
-            // Click and type using the found selector
+            // Click and paste text using the found selector
             await page.click(foundSelector);
-            await page.type(foundSelector, prompt, { delay: 50 });
+            
+            // Optimized: Paste text instantly instead of typing character by character
+            await page.evaluate((selector, text) => {
+                const el = document.querySelector(selector);
+                if (el.tagName.toLowerCase() === 'textarea') {
+                    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+                    if (nativeSetter) {
+                        nativeSetter.call(el, text);
+                    } else {
+                        el.value = text;
+                    }
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                } else {
+                    // For contenteditable div
+                    document.execCommand('insertText', false, text);
+                }
+            }, foundSelector, prompt);
+            
+            // Add a small delay and space to ensure the UI catches up and enables the Send button
+            await new Promise(r => setTimeout(r, 50));
+            await page.type(foundSelector, ' ');
             await page.keyboard.press('Enter');
 
             console.log('Waiting for generation to start...');
@@ -160,7 +180,10 @@ class ChatGPTModule {
             // ✅ FIX: Intercept the DALL-E image at the NETWORK level before CORS policies apply.
             // This avoids the canvas "tainted" bug that caused washed-out/white saved images.
             await page.setRequestInterception(true);
-            page.on('request', (req) => req.continue());
+            page.on('request', (req) => {
+                if (req.isInterceptResolutionHandled()) return;
+                req.continue().catch(() => {});
+            });
             page.on('response', async (response) => {
                 try {
                     const url = response.url();
@@ -212,7 +235,25 @@ class ChatGPTModule {
             const finalPrompt = `Generate exactly 1 high quality image for this prompt. DO NOT write any text, strictly provide the image. Prompt: ${imagePrompt}`;
 
             await page.click(foundSelector);
-            await page.type(foundSelector, finalPrompt, { delay: 50 });
+            
+            // Optimized: Paste text instantly
+            await page.evaluate((selector, text) => {
+                const el = document.querySelector(selector);
+                if (el.tagName.toLowerCase() === 'textarea') {
+                    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+                    if (nativeSetter) {
+                        nativeSetter.call(el, text);
+                    } else {
+                        el.value = text;
+                    }
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                } else {
+                    document.execCommand('insertText', false, text);
+                }
+            }, foundSelector, finalPrompt);
+            
+            await new Promise(r => setTimeout(r, 50));
+            await page.type(foundSelector, ' ');
             await page.keyboard.press('Enter');
 
             console.log('Waiting for DALLE-3 generation to begin...');

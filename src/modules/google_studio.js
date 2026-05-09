@@ -58,7 +58,25 @@ class GoogleStudioModule {
             
             // Focus and send text
             await inputBox.click();
-            await page.keyboard.type(text, { delay: 10 });
+            
+            // Optimized: Paste text instantly
+            await page.evaluate((el, text) => {
+                if (el.tagName.toLowerCase() === 'textarea' || el.tagName.toLowerCase() === 'input') {
+                    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set || 
+                                         Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+                    if (nativeSetter) {
+                        nativeSetter.call(el, text);
+                    } else {
+                        el.value = text;
+                    }
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                } else {
+                    document.execCommand('insertText', false, text);
+                }
+            }, inputBox, text);
+            
+            await new Promise(r => setTimeout(r, 50));
+            await page.keyboard.type(' ');
             
             console.log('Selecting voice and generating...');
             

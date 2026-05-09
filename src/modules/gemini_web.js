@@ -24,7 +24,17 @@ class GeminiWebModule {
             // Image prompt should be specific for Gemini to trigger image generation
             const fullPrompt = `Generate a high-quality cinematic image of: ${prompt}`;
             await page.click(inputSelector);
-            await page.type(inputSelector, fullPrompt);
+            
+            // Optimized: Paste text instantly
+            await page.evaluate((selector, text) => {
+                const el = document.querySelector(selector);
+                if (el) {
+                    document.execCommand('insertText', false, text);
+                }
+            }, inputSelector, fullPrompt);
+            
+            await new Promise(r => setTimeout(r, 50));
+            await page.type(inputSelector, ' ');
             await page.keyboard.press('Enter');
 
             console.log('Waiting for generation to start...');

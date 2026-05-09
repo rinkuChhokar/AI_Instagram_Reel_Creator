@@ -90,11 +90,15 @@ class BrowserManager {
      * Helper for manual login
      * Opens headful browser for the user to log in
      */
-    async manualLogin(url) {
+    async manualLogin(url, vanilla = false) {
         if (this.browser) await this.close();
-        await this.init(false); // headful
+        await this.init(false, vanilla); // headful, vanilla mode passed down
         const page = await this.getPage();
-        await page.goto(url, { waitUntil: 'networkidle2' });
+        try {
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        } catch (e) {
+            console.log('Navigation warning (can be ignored if page loaded):', e.message);
+        }
         console.log(`Please log in to ${url} manually...`);
         console.log('Close the browser window once you are logged in.');
         

@@ -128,9 +128,9 @@ async function main() {
 
     if (isLogin) {
         console.log('Opening browser for manual login...');
-        await browserManager.manualLogin('https://chatgpt.com/');
-        await browserManager.manualLogin('https://gemini.google.com/app');
-        await browserManager.manualLogin('https://aistudio.google.com/app/home');
+        await browserManager.manualLogin('https://chatgpt.com/', false); // Stealth for ChatGPT
+        await browserManager.manualLogin('https://gemini.google.com/app', true); // Vanilla for Google
+        await browserManager.manualLogin('https://aistudio.google.com/app/home', true); // Vanilla for Google
         console.log('Login complete. You can now run the generator.');
         process.exit(0);
     }
