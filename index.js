@@ -5,6 +5,7 @@ const ChatGPTModule = require('./src/modules/chatgpt');
 const GoogleStudioModule = require('./src/modules/google_studio');
 const GeminiWebModule = require('./src/modules/gemini_web');
 const TTSModule = require('./src/modules/tts');
+const ResembleAIModule = require('./src/modules/resemble_ai');
 const GitHubModule = require('./src/modules/github');
 const GoogleDriveModule = require('./src/modules/google_drive');
 const browserManager = require('./src/modules/browser');
@@ -39,6 +40,7 @@ async function main() {
     const isReuse = args.some(arg => arg === '--reuse');
     const isLogin = args.some(arg => arg === '--login');
     const useElevenLabs = args.some(arg => arg === '--use-elevenlab');
+    const useResembleAI = args.some(arg => arg === '--resembleai');
     const isTrending = args.some(arg => arg === '--trending');
     const shouldUpload = args.some(arg => arg === '--upload');
     
@@ -195,7 +197,10 @@ async function main() {
       if (!await fs.pathExists(audioPath) || !isReuse) {
         console.log(`Generating Audio for Scene ${scene.scene_id}...`);
         await retry(async () => {
-            if (useElevenLabs) {
+            if (useResembleAI) {
+                const resemble = new ResembleAIModule(process.env.RESEMBLE_AI_API_KEY, process.env.RESEMBLE_AI_VOICE_ID);
+                await resemble.generateVoice(scene.hindi_content, audioPath);
+            } else if (useElevenLabs) {
                 const tts = new TTSModule(process.env.ELEVENLABS_API_KEY);
                 await tts.generateHindiVoice(scene.hindi_content, audioPath);
             } else {
