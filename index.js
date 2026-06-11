@@ -43,6 +43,7 @@ async function main() {
     const useResembleAI = args.some(arg => arg === '--resembleai');
     const isTrending = args.some(arg => arg === '--trending');
     const shouldUpload = args.some(arg => arg === '--upload');
+    const startFromVoice = args.some(arg => arg === '--start-from-voice-generate-step');
     
     // Upload-only mode: --upload passed with no generation triggers
     const hasCustomPrompt = args.some(arg => !arg.startsWith('--'));
@@ -152,11 +153,15 @@ async function main() {
     const chatgpt = new ChatGPTModule();
     let finalScript;
 
-    if (isReuse) {
-      console.log('♻️ Reuse mode enabled.');
+    if (isReuse || startFromVoice) {
+      if (isReuse) console.log('♻️ Reuse mode enabled.');
+      if (startFromVoice) console.log('⏩ Starting from voice generation step. Loading existing script...');
       if (await fs.pathExists(scriptPath)) {
         finalScript = await fs.readJson(scriptPath);
         console.log('✅ Loaded existing script.');
+      } else if (startFromVoice) {
+        console.error('❌ final_script.json not found! Required for --start-from-voice-generate-step');
+        process.exit(1);
       }
     }
 
@@ -185,22 +190,35 @@ async function main() {
     const geminiWeb = new GeminiWebModule();
 
     // PASS 1: Generate Images (Stealth Mode for Gemini)
-    for (const scene of finalScript.scenes) {
-      const imagePath = path.join(imagesDir, `scene_${scene.scene_id}.png`);
-      if (!await fs.pathExists(imagePath) || !isReuse) {
-        console.log(`Generating Image for Scene ${scene.scene_id}...`);
-        try {
-            await retry(async () => {
-                await geminiWeb.generateImage(scene.visual_prompt, imagePath);
-            });
-        } catch (geminiError) {
-            console.log(`⚠️ Gemini failed after 3 attempts: ${geminiError.message}`);
-            console.log(`🔄 Falling back to ChatGPT DALLE-3 for Image Generation...`);
-            await retry(async () => {
-                await chatgpt.generateImage(scene.visual_prompt, imagePath);
-            });
+    if (!startFromVoice) {
+      for (const scene of finalScript.scenes) {
+        const imagePath = path.join(imagesDir, `scene_${scene.scene_id}.png`);
+        if (!await fs.pathExists(imagePath) || !isReuse) {
+          console.log(`Generating Image for Scene ${scene.scene_id}...`);
+          try {
+              await retry(async () => {
+                  await geminiWeb.generateImage(scene.visual_prompt, imagePath);
+              });
+          } catch (geminiError) {
+              console.log(`⚠️ Gemini failed after 3 attempts: ${geminiError.message}`);
+              console.log(`🔄 Falling back to ChatGPT DALLE-3 for Image Generation...`);
+              await retry(async () => {
+                  await chatgpt.generateImage(scene.visual_prompt, imagePath);
+              });
+          }
         }
       }
+    } else {
+      console.log('⏩ Skipping Image Generation due to --start-from-voice-generate-step');
+      // Validate all images exist
+      for (const scene of finalScript.scenes) {
+        const imagePath = path.join(imagesDir, `scene_${scene.scene_id}.png`);
+        if (!await fs.pathExists(imagePath)) {
+          console.error(`❌ Image not found for Scene ${scene.scene_id} (${imagePath}). All images must exist when using --start-from-voice-generate-step.`);
+          process.exit(1);
+        }
+      }
+      console.log('✅ Verified all scene images exist.');
     }
 
     if (!useElevenLabs && !useResembleAI) {

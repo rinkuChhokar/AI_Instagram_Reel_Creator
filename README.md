@@ -59,6 +59,12 @@ You can mix and match these flags to alter the behavior of the generator on the 
   node index.js --reuse
   ```
 
+* `--start-from-voice-generate-step`
+  Skips the script and image generation steps and starts directly from voice generation. It expects `final_script.json` and all scene images to already be present in the `public` directory. Useful when you already have the script and images generated but need to re-run audio generation or video rendering.
+  ```bash
+  node index.js --start-from-voice-generate-step
+  ```
+
 * `--use-elevenlab`
   Bypasses the Google AI Studio TTS generation (which has very strict daily quotas) and instead routes text-to-speech requests through the official ElevenLabs API. 
   *(Requires `ELEVENLABS_API_KEY` in your `.env` file).*

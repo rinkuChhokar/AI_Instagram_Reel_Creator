@@ -6,7 +6,8 @@
   "scripts": {
     "generate": "node index.js --trending --resembleai --res 720p --upload",
     "dev": "remotion preview src/remotion/index.jsx",
-    "upload": "node index.js --upload"
+    "upload": "node index.js --upload",
+    "start-from-voice": "node index.js --start-from-voice-generate-step --resembleai --res 720p --upload"
   },
   "keywords": [],
   "author": "",
