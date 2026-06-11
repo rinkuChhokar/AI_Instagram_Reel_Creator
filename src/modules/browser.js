@@ -92,18 +92,29 @@ class BrowserManager {
      */
     async manualLogin(url, vanilla = false) {
         if (this.browser) await this.close();
-        await this.init(false, vanilla); // headful, vanilla mode passed down
-        const page = await this.getPage();
-        try {
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        } catch (e) {
-            console.log('Navigation warning (can be ignored if page loaded):', e.message);
+        
+        const chromePath = getChromePath();
+        if (!chromePath) {
+            console.log('Could not find Chrome installation. Please install Chrome.');
+            return;
         }
+
+        console.log(`Launching real Chrome for manual login without debugging...`);
+        const { spawn } = require('child_process');
+        const child = spawn(chromePath, [
+            `--user-data-dir=${this.userDataDir}`,
+            '--start-maximized',
+            url
+        ], {
+            detached: true,
+            stdio: 'ignore'
+        });
+
         console.log(`Please log in to ${url} manually...`);
         console.log('Close the browser window once you are logged in.');
         
         return new Promise((resolve) => {
-            this.browser.on('disconnected', resolve);
+            child.on('exit', resolve);
         });
     }
 }

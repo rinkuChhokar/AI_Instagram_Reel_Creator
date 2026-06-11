@@ -182,14 +182,36 @@ async function main() {
       console.log('💾 Script saved.');
     }
 
-    console.log('Switching to Vanilla Chrome to prevent Google endpoints 403 blocks...');
-    await browserManager.relaunchAsVanilla();
-
-    const googleStudio = new GoogleStudioModule();
     const geminiWeb = new GeminiWebModule();
 
+    // PASS 1: Generate Images (Stealth Mode for Gemini)
+    for (const scene of finalScript.scenes) {
+      const imagePath = path.join(imagesDir, `scene_${scene.scene_id}.png`);
+      if (!await fs.pathExists(imagePath) || !isReuse) {
+        console.log(`Generating Image for Scene ${scene.scene_id}...`);
+        try {
+            await retry(async () => {
+                await geminiWeb.generateImage(scene.visual_prompt, imagePath);
+            });
+        } catch (geminiError) {
+            console.log(`⚠️ Gemini failed after 3 attempts: ${geminiError.message}`);
+            console.log(`🔄 Falling back to ChatGPT DALLE-3 for Image Generation...`);
+            await retry(async () => {
+                await chatgpt.generateImage(scene.visual_prompt, imagePath);
+            });
+        }
+      }
+    }
+
+    if (!useElevenLabs && !useResembleAI) {
+        console.log('Switching to Vanilla Chrome to prevent Google endpoints 403 blocks for Google Studio...');
+        await browserManager.relaunchAsVanilla();
+    }
+
+    const googleStudio = new GoogleStudioModule();
     const scenesWithAssets = [];
 
+    // PASS 2: Generate Audio
     for (const scene of finalScript.scenes) {
       const audioPath = path.join(audioDir, `scene_${scene.scene_id}.mp3`);
       const imagePath = path.join(imagesDir, `scene_${scene.scene_id}.png`);
@@ -207,21 +229,6 @@ async function main() {
                 await googleStudio.generateAudio(scene.hindi_content, audioPath);
             }
         });
-      }
-
-      if (!await fs.pathExists(imagePath) || !isReuse) {
-        console.log(`Generating Image for Scene ${scene.scene_id}...`);
-        try {
-            await retry(async () => {
-                await geminiWeb.generateImage(scene.visual_prompt, imagePath);
-            });
-        } catch (geminiError) {
-            console.log(`⚠️ Gemini failed after 3 attempts: ${geminiError.message}`);
-            console.log(`🔄 Falling back to ChatGPT DALLE-3 for Image Generation...`);
-            await retry(async () => {
-                await chatgpt.generateImage(scene.visual_prompt, imagePath);
-            });
-        }
       }
 
       const duration = await getAudioDuration(audioPath);
