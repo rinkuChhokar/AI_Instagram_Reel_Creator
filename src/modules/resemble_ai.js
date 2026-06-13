@@ -28,7 +28,7 @@ class ResembleAIModule {
                 output_format: "mp3"
             },
             headers: {
-                'Authorization': this.apiKey,
+                'Authorization': `${this.apiKey}`,
                 'Content-Type': 'application/json',
                 'Accept-Encoding': 'gzip'
             }
