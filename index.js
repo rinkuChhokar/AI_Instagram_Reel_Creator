@@ -255,17 +255,23 @@ async function main() {
         ...scene,
         audioPath: `audio/scene_${scene.scene_id || scene.id}.mp3`,
         imagePath: `images/scene_${scene.scene_id || scene.id}.png`,
-        durationInFrames: Math.ceil(duration * 30) + 15, 
+        audioDurationInFrames: Math.ceil(duration * 30),
+        durationInFrames: Math.ceil(duration * 30) + 15,
       });
     }
 
     console.log('🎬 Rendering video...');
     const entry = path.join(__dirname, 'src', 'remotion', 'index.jsx');
     const bundleLocation = await bundle(entry);
+    const inputProps = {
+      scenes: scenesWithAssets,
+      title: finalScript.video_title,
+      handle: process.env.REEL_HANDLE || '@RCBackendBite',
+    };
     const composition = await selectComposition({
       serveUrl: bundleLocation,
       id: 'Reel',
-      inputProps: { scenes: scenesWithAssets },
+      inputProps,
     });
 
     const outputLocation = path.join(__dirname, 'public', 'final_reel.mp4');
@@ -278,7 +284,7 @@ async function main() {
           outputLocation,
           codec: 'h264',
           scale: renderScale,
-          inputProps: { scenes: scenesWithAssets },
+          inputProps,
           onProgress: ({ progress }) => {
             console.log(`Rendering progress: ${Math.round(progress * 100)}%`);
           },

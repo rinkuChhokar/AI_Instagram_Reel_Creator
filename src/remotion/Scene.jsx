@@ -1,104 +1,63 @@
 import { AbsoluteFill, useVideoConfig, useCurrentFrame, interpolate, spring, staticFile, Img } from 'remotion';
+import { Captions } from './Captions';
 
-export const Scene = ({ id, text, image, duration }) => {
+// Camera moves rotate per scene so consecutive shots never feel identical
+// [scale, translateX %, translateY %]
+const CAMERA_MOVES = [
+  { from: [1.05, 0, 0], to: [1.22, 0, -2] },   // slow push-in
+  { from: [1.22, -3, 0], to: [1.1, 3, 0] },    // pull-out + pan right
+  { from: [1.1, 0, 3], to: [1.2, 0, -3] },     // tilt up
+  { from: [1.2, 3, 0], to: [1.08, -3, 1] },    // pull-out + pan left
+];
+
+const ENTRY_FRAMES = 10;
+const EXIT_FRAMES = 6;
+
+export const Scene = ({ index, text, image, duration, captionFrames, accent }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
-  // 1. Text Subdivision Logic
-  // Split text into words to prevent it from covering >25% of the screen
-  const words = text.split(' ');
-  const chunks = [];
-  let currentChunk = [];
-  
-  // Roughly 4-5 words per chunk for fast-paced modern Reels reading
-  for (let i = 0; i < words.length; i++) {
-    currentChunk.push(words[i]);
-    if (currentChunk.length >= 4 || i === words.length - 1) {
-      chunks.push(currentChunk.join(' '));
-      currentChunk = [];
-    }
-  }
+  const move = CAMERA_MOVES[index % CAMERA_MOVES.length];
+  const progress = interpolate(frame, [0, duration], [0, 1], { extrapolateRight: 'clamp' });
+  const ease = (t) => 1 - Math.pow(1 - t, 2);
+  const [s, x, y] = move.from.map((v, i) => v + (move.to[i] - v) * ease(progress));
 
-  // Calculate active chunk over the duration to naturally sync with the spoken audio
-  const activeChunkIndex = Math.min(
-    Math.floor((frame / duration) * chunks.length),
-    chunks.length - 1
-  );
-  const activeText = chunks[activeChunkIndex];
+  // Punch-in on entry: overshoot zoom + motion blur that settles in ~10 frames
+  const punch = spring({ frame, fps, config: { damping: 14, stiffness: 140 } });
+  const entryScale = interpolate(punch, [0, 1], [1.3, 1]);
+  const entryBlur = interpolate(frame, [0, ENTRY_FRAMES], [16, 0], { extrapolateRight: 'clamp' });
 
-  // 2. InShot-Style Flicker / Flash Transition Effect
-  // A quick white flash at the beginning of the scene spanning a few frames
-  const flashOpacity = interpolate(frame, [0, 4, 8], [0.8, 0, 0], {
-     extrapolateRight: 'clamp',
-  });
-  
-  // Film flicker effect (slight brightness pulse every few frames)
-  const isFlicker = frame % 6 < 3 ? 1 : 0.95;
+  // Whip-zoom out of the scene so the cut into the next one feels continuous
+  const exitStart = duration - EXIT_FRAMES;
+  const exitScale = interpolate(frame, [exitStart, duration], [1, 1.18], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
+  const exitBlur = interpolate(frame, [exitStart, duration], [0, 14], { extrapolateLeft: 'clamp', extrapolateRight: 'clamp' });
 
-  // Zoom effect (Ken Burns)
-  const scale = interpolate(frame, [0, duration], [1, 1.15], {
-    extrapolateRight: 'clamp',
-  });
-
-  // Calculate duration of each chunk for snappy text popping animations
-  const framesPerChunk = duration / chunks.length;
-  const chunkFrame = frame % framesPerChunk;
-  
-  // Text pops in slightly on every new chunk!
-  const textScale = spring({
-    frame: chunkFrame,
-    fps,
-    config: { damping: 10, mass: 0.6 },
-  });
+  // Accent-coloured light flash on every cut except the opening frame (keeps the hook instant)
+  const flashOpacity = index === 0 ? 0 : interpolate(frame, [0, 6], [0.45, 0], { extrapolateRight: 'clamp' });
 
   return (
-    <AbsoluteFill style={{ backgroundColor: 'black' }}>
-      {/* Background Image with Zoom and Flicker */}
+    <AbsoluteFill style={{ backgroundColor: 'black', overflow: 'hidden' }}>
       <AbsoluteFill style={{
-        transform: `scale(${scale})`,
-        overflow: 'hidden',
-        filter: `brightness(${isFlicker})`
+        transform: `scale(${s * entryScale * exitScale}) translate(${x}%, ${y}%)`,
+        filter: `blur(${entryBlur + exitBlur}px) saturate(1.15) contrast(1.05)`,
       }}>
         <Img src={staticFile(image)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
       </AbsoluteFill>
 
-      {/* Dark Overlay for insane text readability (top and bottom gradients) */}
+      {/* Cinematic vignette + darker caption band for readability on any image */}
       <AbsoluteFill style={{
-        background: 'linear-gradient(to bottom, rgba(0,0,0,0.6) 0%, transparent 40%, transparent 60%, rgba(0,0,0,0.7) 100%)'
+        background: 'radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.55) 100%)',
+      }} />
+      <AbsoluteFill style={{
+        background: 'linear-gradient(to bottom, rgba(0,0,0,0.55) 0%, transparent 22%, transparent 48%, rgba(0,0,0,0.6) 62%, rgba(0,0,0,0.25) 78%, rgba(0,0,0,0.6) 100%)',
       }} />
 
-      {/* Modern Reel Caption (Instagram style: Yellow text, black stroke, bottom-center) */}
-      <div style={{
-        position: 'absolute',
-        top: '60%', // Placed near the bottom center explicitly for Shorts/Reels layout bounds 
-        left: '5%',
-        right: '5%',
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        transform: `scale(${textScale})`, // POP effect on each word chunk!
-      }}>
-        <h1 style={{
-          color: '#ffde59', // Classic Instagram Reels bright yellow
-          fontSize: '72px',
-          fontWeight: '900',
-          fontFamily: '"Montserrat", "Impact", "Inter", sans-serif',
-          margin: 0,
-          lineHeight: 1.1,
-          textAlign: 'center',
-          textTransform: 'uppercase',
-          WebkitTextStroke: '3px black', // Intense stroke like typical caption apps
-          textShadow: '0px 6px 15px rgba(0,0,0,0.9)', // Deep drop shadow
-        }}>
-          {activeText}
-        </h1>
-      </div>
+      <Captions text={text} totalFrames={captionFrames} accent={accent} />
 
-      {/* Flash Transition Overlay Layer (InShot Style) */}
       <AbsoluteFill style={{
-        backgroundColor: 'white',
+        background: `radial-gradient(circle at 50% 40%, #ffffff 0%, ${accent} 60%)`,
+        mixBlendMode: 'screen',
         opacity: flashOpacity,
-        pointerEvents: 'none' // Don't block interactions
       }} />
     </AbsoluteFill>
   );

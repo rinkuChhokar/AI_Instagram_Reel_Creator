@@ -18,6 +18,7 @@
     "@google/generative-ai": "^0.24.1",
     "@remotion/bundler": "^4.0.441",
     "@remotion/cli": "^4.0.441",
+    "@remotion/google-fonts": "4.0.441",
     "@remotion/renderer": "^4.0.441",
     "axios": "^1.14.0",
     "dotenv": "^17.3.1",

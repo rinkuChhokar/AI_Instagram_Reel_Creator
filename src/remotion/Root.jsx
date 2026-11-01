@@ -19,6 +19,8 @@ export const RemotionRoot = () => {
           };
         }}
         defaultProps={{
+          title: "🚀 GitHub ka sabse trending project!",
+          handle: "@RCBackendBite",
           scenes: [
             {
               id: 1,
