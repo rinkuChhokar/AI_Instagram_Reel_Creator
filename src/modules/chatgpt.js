@@ -1,6 +1,187 @@
+const fs = require('fs');
 const browserManager = require('./browser');
 
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Newest ChatGPT UI first (textarea#pending-conversation-input, aria-label "Ask ChatGPT"),
+// then the older layouts as fallbacks
+const PROMPT_SELECTORS = [
+    'textarea#pending-conversation-input',
+    'textarea[aria-label*="ChatGPT"]',
+    '[data-composer-input] textarea',
+    'div#prompt-textarea',
+    'textarea#prompt-textarea',
+    'textarea[placeholder*="ChatGPT"]',
+    '[contenteditable="true"]',
+];
+
+const SEND_SELECTOR = 'button[aria-label="Send"], button[data-testid="send-button"], button[aria-label*="Send prompt"]';
+const STOP_SELECTOR = 'button[aria-label*="Stop" i], button[data-testid*="stop"]';
+
+// Returns every top-level {...} block in the text. String-aware, so braces inside
+// JSON string values don't break the matching.
+const extractJsonObjects = (text) => {
+    const found = [];
+    for (let i = 0; i < text.length; i++) {
+        if (text[i] !== '{') continue;
+        let depth = 0, inString = false, escaped = false;
+        for (let j = i; j < text.length; j++) {
+            const c = text[j];
+            if (inString) {
+                if (escaped) escaped = false;
+                else if (c === '\\') escaped = true;
+                else if (c === '"') inString = false;
+                continue;
+            }
+            if (c === '"') inString = true;
+            else if (c === '{') depth++;
+            else if (c === '}' && --depth === 0) {
+                found.push(text.slice(i, j + 1));
+                i = j;
+                break;
+            }
+        }
+    }
+    return found;
+};
+
+// Picks the last JSON object across the candidate texts that looks like a video script
+const findScriptJson = (texts) => {
+    for (const text of texts) {
+        if (!text) continue;
+        const objects = extractJsonObjects(text).reverse();
+        for (const raw of objects) {
+            try {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed.scenes) && parsed.scenes.length > 0) return parsed;
+            } catch (e) { /* not valid JSON, keep looking */ }
+        }
+    }
+    return null;
+};
+
 class ChatGPTModule {
+    async submitPrompt(page, text, failureScreenshot) {
+        let foundSelector = null;
+        for (const selector of PROMPT_SELECTORS) {
+            try {
+                const el = await page.waitForSelector(selector, { timeout: 5000, visible: true });
+                if (el) {
+                    foundSelector = selector;
+                    console.log(`Found visible prompt area with selector: ${selector}`);
+                    break;
+                }
+            } catch (e) {
+                continue;
+            }
+        }
+
+        if (!foundSelector) {
+            await page.screenshot({ path: failureScreenshot });
+            throw new Error(`Could not find visible ChatGPT prompt textarea. See ${failureScreenshot}`);
+        }
+
+        await page.click(foundSelector);
+
+        // Paste text instantly instead of typing character by character
+        await page.evaluate((selector, value) => {
+            const el = document.querySelector(selector);
+            if (el.tagName.toLowerCase() === 'textarea') {
+                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+                if (nativeSetter) {
+                    nativeSetter.call(el, value);
+                } else {
+                    el.value = value;
+                }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+            } else {
+                // For contenteditable div
+                document.execCommand('insertText', false, value);
+            }
+        }, foundSelector, text);
+
+        // Small delay and a typed space so React registers the input and enables Send
+        await sleep(50);
+        await page.type(foundSelector, ' ');
+        await page.keyboard.press('Enter');
+
+        // If Enter didn't submit (prompt still in the box), click the Send button directly
+        await sleep(1000);
+        const stillHasText = await page.evaluate((selector) => {
+            const el = document.querySelector(selector);
+            if (!el) return false;
+            return (el.value ?? el.innerText ?? '').trim().length > 0;
+        }, foundSelector);
+        if (stillHasText) {
+            console.log('Enter did not submit, clicking Send button...');
+            const sendBtn = await page.$(SEND_SELECTOR);
+            if (sendBtn) await sendBtn.click();
+        }
+    }
+
+    // Collects text from code blocks, assistant messages and finally the whole thread.
+    // Kept selector-light on purpose: ChatGPT renames its classes often, but the JSON
+    // text itself is always on the page.
+    async collectPageTexts(page) {
+        return page.evaluate((stopSelector) => {
+            const texts = [];
+            const codeBlocks = Array.from(document.querySelectorAll('pre, code, .cm-content')).reverse();
+            if (codeBlocks[0]) codeBlocks[0].scrollIntoView({ block: 'end' });
+            codeBlocks.forEach(el => texts.push(el.innerText));
+
+            const messages = document.querySelectorAll('[data-message-author-role="assistant"], [data-turn="assistant"], section[data-turn]');
+            if (messages.length) texts.push(messages[messages.length - 1].innerText);
+
+            const main = document.querySelector('main') || document.body;
+            texts.push(main.innerText);
+
+            return { generating: !!document.querySelector(stopSelector), texts };
+        }, STOP_SELECTOR);
+    }
+
+    // Polls until a valid script JSON is on the page and unchanged across two polls
+    // (i.e. streaming has finished)
+    async waitForScriptJson(page, timeoutMs = 180000) {
+        const start = Date.now();
+        let previous = null;
+        while (Date.now() - start < timeoutMs) {
+            await sleep(2000);
+            const { generating, texts } = await this.collectPageTexts(page);
+            if (generating) continue;
+
+            const parsed = findScriptJson(texts);
+            if (!parsed) continue;
+
+            const signature = JSON.stringify(parsed);
+            if (signature === previous) return parsed;
+            previous = signature;
+        }
+        return null;
+    }
+
+    // Fallback: press ChatGPT's own Copy buttons (newest first) and read the clipboard
+    async readViaCopyButton(page) {
+        try {
+            await page.browserContext().overridePermissions('https://chatgpt.com', ['clipboard-read', 'clipboard-write', 'clipboard-sanitized-write']);
+            await page.bringToFront();
+        } catch (e) {
+            console.warn('Could not grant clipboard permission:', e.message);
+            return null;
+        }
+
+        const buttons = (await page.$$('button[aria-label*="Copy" i], button[data-testid*="copy"]')).reverse();
+        for (const button of buttons) {
+            try {
+                await button.click();
+                await sleep(500);
+                const text = await page.evaluate(() => navigator.clipboard.readText());
+                const parsed = findScriptJson([text]);
+                if (parsed) return parsed;
+            } catch (e) { /* try the next copy button */ }
+        }
+        return null;
+    }
+
     async generateScript(prompt) {
         let page;
         try {
@@ -18,149 +199,25 @@ class ChatGPTModule {
             }
 
             console.log('Entering prompt...');
-            const textareaSelectors = ['div#prompt-textarea', 'textarea#prompt-textarea', 'textarea[placeholder*="ChatGPT"]', '[contenteditable="true"]'];
-            
-            let foundSelector = null;
-            for (const selector of textareaSelectors) {
-                try {
-                    const el = await page.waitForSelector(selector, { timeout: 5000, visible: true });
-                    if (el) {
-                        foundSelector = selector;
-                        console.log(`Found visible prompt area with selector: ${selector}`);
-                        break;
-                    }
-                } catch (e) {
-                    continue;
-                }
+            await this.submitPrompt(page, prompt, 'chatgpt_failure.png');
+
+            console.log('Waiting for ChatGPT to finish writing the script JSON...');
+            let script = await this.waitForScriptJson(page);
+
+            if (!script) {
+                console.warn('Could not read JSON from the page, trying the Copy button...');
+                script = await this.readViaCopyButton(page);
             }
 
-            if (!foundSelector) {
-                await page.screenshot({ path: 'chatgpt_failure.png' });
-                throw new Error('Could not find visible ChatGPT prompt textarea. See chatgpt_failure.png');
+            if (!script) {
+                // Save the live (rendered) DOM so selectors can be fixed against the real markup
+                await page.screenshot({ path: 'chatgpt_failure.png' }).catch(() => {});
+                fs.writeFileSync('chatgpt_failure_dom.html', await page.content());
+                throw new Error('Could not find a valid script JSON in the ChatGPT response. See chatgpt_failure.png and chatgpt_failure_dom.html');
             }
 
-            // Click and paste text using the found selector
-            await page.click(foundSelector);
-            
-            // Optimized: Paste text instantly instead of typing character by character
-            await page.evaluate((selector, text) => {
-                const el = document.querySelector(selector);
-                if (el.tagName.toLowerCase() === 'textarea') {
-                    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-                    if (nativeSetter) {
-                        nativeSetter.call(el, text);
-                    } else {
-                        el.value = text;
-                    }
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                } else {
-                    // For contenteditable div
-                    document.execCommand('insertText', false, text);
-                }
-            }, foundSelector, prompt);
-            
-            // Add a small delay and space to ensure the UI catches up and enables the Send button
-            await new Promise(r => setTimeout(r, 50));
-            await page.type(foundSelector, ' ');
-            await page.keyboard.press('Enter');
-
-            console.log('Waiting for generation to start...');
-            // Wait up to 15 seconds for the stop button to appear or send button to correctly disable
-            try {
-                await page.waitForFunction(() => {
-                    const stopBtn = document.querySelector('button[aria-label*="Stop"], button[data-testid*="stop"]');
-                    const sendBtn = document.querySelector('button[data-testid="send-button"]');
-                    const isGenerating = stopBtn || (sendBtn && sendBtn.disabled);
-                    const messages = document.querySelectorAll('div[data-message-author-role="assistant"]');
-                    const isStreaming = messages.length > 0 && messages[messages.length - 1].querySelector('.result-streaming');
-                    return isGenerating || isStreaming;
-                }, { timeout: 15000, polling: 1000 });
-            } catch (e) {
-                console.log('Generation started very slowly or very quickly, proceeding to completion check...');
-            }
-
-            console.log('Waiting for response to complete...');
-            // Now wait for generation to completely finish
-            try {
-                await page.waitForFunction(
-                    () => {
-                        const stopBtns = document.querySelector('button[aria-label*="Stop"], button[data-testid*="stop"], button[aria-label*="stop"]');
-                        if (stopBtns) return false; // Still generating
-                        
-                        const messages = document.querySelectorAll('div[data-message-author-role="assistant"]');
-                        if (messages.length === 0) return false; 
-
-                        const lastMessage = messages[messages.length - 1];
-                        if (lastMessage.querySelector('.result-streaming')) return false; // Still streaming
-
-                        // Check for the appearance of the turn action Copy button
-                        const actionButtons = Array.from(lastMessage.querySelectorAll('button'));
-                        const hasTurnCopyBtn = actionButtons.some(b => 
-                            (b.getAttribute('data-testid') || '').includes('copy-turn-action') ||
-                            (b.className || '').includes('copy') && !b.innerText.includes('Copy code')
-                        );
-
-                        // Generation is done if: No stop button, no streaming class, and we have text.
-                        // If we see the specific turn action copy button, even better.
-                        return hasTurnCopyBtn || lastMessage.innerText.trim().length > 50;
-                    },
-                    { timeout: 120000, polling: 2000 }
-                );
-            } catch (e) {
-                console.warn('Timeout waiting for completion, attempting to scrape anyway...');
-            }
-
-            console.log('Scraping response...');
-            // Get the last message from ChatGPT
-            const script = await page.evaluate(() => {
-                const messages = document.querySelectorAll('div[data-message-author-role="assistant"]');
-                const lastMessage = messages[messages.length - 1];
-                if (!lastMessage) return null;
-                
-                // Try to find the Markdown content container
-                const content = lastMessage.querySelector('.markdown') || lastMessage;
-                
-                // Try to find code block first
-                const codeBlock = content.querySelector('code');
-                if (codeBlock) return codeBlock.innerText;
-
-                return content.innerText;
-            });
-
-            if (!script) throw new Error('Could not scrape script from ChatGPT');
-
-            // Try to parse as JSON if possible, otherwise clean up
-            try {
-                let cleaned = script.replace(/```json|```/gi, '').trim();
-                
-                // ChatGPT's new UI sometimes prepends "JSON\n" or "json" 
-                // to codeBlock.innerText because of the language badge.
-                // To be bulletproof, we isolate the first { or [ to the last } or ].
-                const firstBrace = cleaned.indexOf('{');
-                const firstBracket = cleaned.indexOf('[');
-                let startIdx = -1;
-                if (firstBrace !== -1 && firstBracket !== -1) startIdx = Math.min(firstBrace, firstBracket);
-                else if (firstBrace !== -1) startIdx = firstBrace;
-                else if (firstBracket !== -1) startIdx = firstBracket;
-                
-                if (startIdx !== -1) {
-                    const lastBrace = cleaned.lastIndexOf('}');
-                    const lastBracket = cleaned.lastIndexOf(']');
-                    let endIdx = -1;
-                    if (lastBrace !== -1 && lastBracket !== -1) endIdx = Math.max(lastBrace, lastBracket);
-                    else if (lastBrace !== -1) endIdx = lastBrace;
-                    else if (lastBracket !== -1) endIdx = lastBracket;
-                    
-                    if (endIdx !== -1 && endIdx > startIdx) {
-                        cleaned = cleaned.substring(startIdx, endIdx + 1);
-                    }
-                }
-                
-                return JSON.parse(cleaned);
-            } catch (e) {
-                console.warn('Response is not valid JSON, returning raw text.');
-                return script;
-            }
+            console.log(`✅ Script JSON captured (${script.scenes.length} scenes).`);
+            return script;
 
         } catch (error) {
             console.error('ChatGPT Generation Error:', error);
@@ -170,7 +227,6 @@ class ChatGPTModule {
 
     async generateImage(imagePrompt, outputPath) {
         let page;
-        const fs = require('fs');
         let capturedImageBuffer = null;
 
         try {
@@ -212,49 +268,8 @@ class ChatGPTModule {
             if (isLoggedOut) throw new Error('ChatGPT session expired. Please run manual login.');
 
             console.log('Entering image prompt into ChatGPT...');
-            const textareaSelectors = [
-                'div#prompt-textarea',
-                'textarea#prompt-textarea',
-                'textarea[placeholder*="ChatGPT"]',
-                '[contenteditable="true"]'
-            ];
-
-            let foundSelector = null;
-            for (const selector of textareaSelectors) {
-                try {
-                    const el = await page.waitForSelector(selector, { timeout: 5000, visible: true });
-                    if (el) { foundSelector = selector; break; }
-                } catch (e) { continue; }
-            }
-
-            if (!foundSelector) {
-                await page.screenshot({ path: 'chatgpt_dalle_failure.png' });
-                throw new Error('Could not find visible ChatGPT prompt textarea.');
-            }
-
             const finalPrompt = `Generate exactly 1 high quality image for this prompt. DO NOT write any text, strictly provide the image. Prompt: ${imagePrompt}`;
-
-            await page.click(foundSelector);
-            
-            // Optimized: Paste text instantly
-            await page.evaluate((selector, text) => {
-                const el = document.querySelector(selector);
-                if (el.tagName.toLowerCase() === 'textarea') {
-                    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-                    if (nativeSetter) {
-                        nativeSetter.call(el, text);
-                    } else {
-                        el.value = text;
-                    }
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                } else {
-                    document.execCommand('insertText', false, text);
-                }
-            }, foundSelector, finalPrompt);
-            
-            await new Promise(r => setTimeout(r, 50));
-            await page.type(foundSelector, ' ');
-            await page.keyboard.press('Enter');
+            await this.submitPrompt(page, finalPrompt, 'chatgpt_dalle_failure.png');
 
             console.log('Waiting for DALLE-3 generation to begin...');
             await new Promise(r => setTimeout(r, 2000));
